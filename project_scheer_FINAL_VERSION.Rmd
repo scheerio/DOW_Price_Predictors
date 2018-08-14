@@ -1,0 +1,741 @@
+---
+title: "DOW Price Predictors"
+author: "Ben Scheer"
+date: "12/11/2017"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,warning=FALSE,results ='hide',include=TRUE, message=FALSE)
+
+#Downloading the data and putting it into a new dataset
+
+#libraries
+library(quantmod)
+library(tidyquant)
+library(zoo)
+library(tidyverse)
+library(plotly)
+library(gridExtra)
+library(ModelMetrics)
+library(forcats)
+library(RColorBrewer)
+library(forcats)
+library(ggplot2)
+library(dplyr)
+library(stargazer)
+library(modelr)
+library(caret)
+library(knitr)
+library(texreg)
+
+##get data
+getSymbols("MMM",src="google")
+getSymbols("AXP",src="google")
+getSymbols("AAPL",src="google")
+getSymbols("BA",src="google")
+getSymbols("CAT",src="google")
+getSymbols("CVX",src="google")
+getSymbols("CSCO",src="google")
+getSymbols("KO",src="google")
+getSymbols("DIS",src="google")
+getSymbols("XOM",src="google")
+getSymbols("GE",src="google")
+getSymbols("GS",src="google")
+getSymbols("HD",src="google")
+getSymbols("IBM",src="google")
+getSymbols("INTC",src="google")
+getSymbols("JNJ",src="google")
+getSymbols("JPM",src="google")
+getSymbols("MCD",src="google")
+getSymbols("MRK",src="google")
+getSymbols("MSFT",src="google")
+getSymbols("NKE",src="google")
+getSymbols("PFE",src="google")
+getSymbols("PG",src="google")
+getSymbols("TRV",src="google")
+getSymbols("UTX",src="google")
+getSymbols("UNH",src="google")
+getSymbols("VZ",src="google")
+getSymbols("V",src="google")
+getSymbols("WMT",src="google")
+
+symbols<-c("MMM","AXP","AAPL","BA","CAT","CVX","CSCO","KO","DIS","XOM","GE","GS","HD","IBM","INTC","JNJ","JPM","MCD","MRK","MSFT","NKE","PFE","PG","TRV","UTX","UNH","VZ","V","WMT")
+
+stock_prices<-symbols%>%
+                     tq_get(
+                     get="stock.prices",
+                     from="2001-01-01",
+                     to="2018-01-01"
+                     )
+   
+## Summarize at month and year level
+stock_prices<-stock_prices%>%group_by(symbol)%>%
+  tq_transmute(mutate_fun = to.period,period="months")
+
+## Create variables for month and year
+stock_prices$year<-year(stock_prices$date)
+
+stock_prices$month<-month(stock_prices$date)
+
+## Download financial data 
+
+financials<-
+  symbols%>%
+  tq_get(get="financials")
+
+#Income statement list
+is_list<-c("Total Revenue",
+           "Gross Profit")
+
+# Get income statements (IS) and select only items on list
+fin_IS<-financials %>%
+  filter(type == "IS") %>%
+  select(symbol,quarter)%>%
+  unnest()%>%
+  select(symbol,category,value,date)%>%
+  filter(category%in%is_list)
+
+#Balance sheet list
+balance_list<-c(
+  "Total Current Assets",
+  "Total Equity")
+
+## get balance sheet and select only items on list
+fin_BS<-financials %>%
+  filter(type == "BS") %>%
+  select(symbol,quarter)%>%
+  unnest()%>%
+  select(symbol,category,value,date)%>%
+  filter(category%in%balance_list)
+
+
+## Cash Flow list
+cf_list<-c("Net Change in Cash",
+           "Cash from Operating Activities")
+
+
+# Get cash flow (CF) and select only items on list
+fin_CF<-financials %>%
+  filter(type == "CF") %>%
+  select(symbol,quarter)%>%
+  unnest()%>%
+  select(symbol,category,value,date)%>%
+  filter(category%in%cf_list)
+
+fin<-rbind(fin_BS,fin_CF,fin_IS)
+
+## One column per cateogry
+fin<-fin%>%spread(key=category,
+                  value=value)
+
+## Add year and month
+fin$year<-year(fin$date)
+fin$month<-month(fin$date)
+
+## drop date from both
+stock_prices<-stock_prices%>%select(-date)
+fin<-fin%>%select(-date)
+
+overall<-left_join(fin,stock_prices,by=c("symbol","year","month"))
+
+## Zacks Fundamentals
+
+quandl_api_key("ovo4SZPXeGowsg5R3g2n")
+
+fundamentals<-tq_get("ZACKS/FR", get = "quandl.datatable")   
+
+## Change names
+fundamentals$symbol<-fundamentals$ticker
+
+## Get year and month for merging
+fundamentals$year<-year(fundamentals$per_end_date)
+fundamentals$month<-month(fundamentals$per_end_date)
+
+##Merge with overall
+overall<-left_join(overall,fundamentals,by=c("symbol","year","month"))
+
+## Model closing price 
+reg1<-lm(log(close)~profit_margin,data=overall);summary(reg1)
+```
+
+What Predicts The Price Changes of Dow 30 Stocks?
+
+Ben Scheer
+
+10/23/2017
+
+..........
+
+The Problem
+
+Understanding what factors influence DOW 30 stock price movements is a key factor in investment decisions made worldwide. Markets are constantly changing, and investors are concerned with predicting stock price movements. Stock prices influence investment decisions, and it is important to many investors to make profitable decisions. In particular, we need to make sure that we pay attention to the financial details of these stocks that help predict changes in price. This may help provide some inside into key variables that are correlated with changes in price. It may even expose certain stocks in the DOW that are worth looking into.
+
+..........
+
+The Data
+
+The data for this analysis come from Quandl, which collects accurate trading data for different stocks, including the DOW 30. Stock data was taken from January 1st, 2001 through the present. The stock price data alone contains information about highs, lows, volume, and some other information, but more data was needed in terms of financial variables. Combining stock price data with other financials data by symbol and date provides a dataset with an array of variables to analyze. This includes information about company profits, company assets, and much more. This dataset allows us to look at how prices change over time, and also allows us to see if certain variables correlate with price changes.
+
+To start, we can look at how DOW stock prices have changed, in general, over time. The figure below shows stock price movement (in dollars) over time (in months).
+
+```{r}
+#plotting prices over time, to show the variance in price changes
+gg<-ggplot(data=overall,aes(y=close,x=month,color=symbol))
+gg<-gg+geom_line(alpha=.5,size=.5)
+gg<-gg+ggtitle("Prices Over Time") + theme(plot.title = element_text(hjust = 0.5))
+gg<-gg+xlab("Time")+ylab("Closing Prices")
+gg
+```
+
+Lines in the graph represents a stock's price movement over time, each individual line representing a different stock, as indicated by its color. Plotting closing prices over time for the stocks in the DOW, the figure shows that prices change quite unpredictably. How predictable are they? Out of the financial data available, margins and ratios are often used to analyze companies. These metrics tell investors important financial details about either a company or the company's stock. The question for us is: Which margins and ratios help predict the price changes for these 30 stocks?
+
+..........
+
+Which margins and ratios help predict DOW 30 prices?
+
+Main margins and ratios from the dataset to consider are listed below. Margins or ratios that included no or minimal data were excluded from the analysis.
+
+Current ratio,
+gross margin,
+operating profit margin,
+EBIT margin,
+EBITDA margin,
+pretax profit margin,
+profit margin,
+free cash flow per share.
+
+The first thing we can do is see what the relationship between stock prices and one variable is like. Here is an plot showing, for example, the relationship between closing price and profit margin for these stocks. 
+
+```{r}
+## Plot closing price by profit margin
+gg1<-ggplot(overall,aes(x=profit_margin,y=close,color=symbol))
+gg1<-gg1+scale_y_continuous(trans="log",breaks=c(100,200))
+gg1<-gg1+xlab("Profit Margin")+ylab("Closing Prices")
+gg1<-gg1+ggtitle("Closing Price by Profit Margin") + theme(plot.title = element_text(hjust = 0.5))
+gg1<-gg1+geom_point()
+gg1
+```
+
+Plotted points on the graph represents company profit margins compared to the closing price of its stock at different times, and different companies are indicated my the color of the point. Each company has several profit margin to stock price comparisons over time. It appears that when we look at profit margin of a company at a given time, it is difficult to predict in what the company's stock price will be. There is not a clear relationship to be seen here, but by analyzing other variables, we can find out how closely margins and ratios relate to closing prices.
+
+Unconditional means allows us to predict the average of a dependent variable based on levels of other variables. Using the unconditional mean as a predictor, we can find the margins and ratios that best predict price. Here are several price to variable comparisons for margins and ratios in our dataset.
+
+This is a graph showing average prices at levels of the current ratio:
+
+```{r}
+
+##----------------------------------------------
+##-------COND MEAN USING CURRENT RATIO----------
+
+##Condtional Average across a single variable
+data1<-overall
+## Create a variable for quartiles of college education
+data1<-data1%>%mutate(predictor_level=ntile(curr_ratio,4))
+
+data1<-data1%>%group_by(predictor_level)%>% ## Group by predictor
+  ##Calculate mean at each level of predictor
+  mutate(pred_close=mean(close))%>% 
+  ## Ungroup
+  ungroup()%>% 
+  #Rank by prediction, with ties sorted randomly
+  mutate(pred_close_rank=rank(pred_close,ties.method="random"))
+
+#graph
+gg2<-ggplot(data=data1,aes(x=pred_close_rank,y=close,color="Actual"))
+gg2<-gg2+geom_point(alpha=.5,size=.5)
+gg2<-gg2+geom_point(aes(x=pred_close_rank,y=pred_close,color="Predicted:Conditional Mean, 1 var"))
+gg2<-gg2+ scale_color_manual("Type",values=c("Predicted:Conditional Mean, 1 var"="red","Actual"="black"))
+gg2<-gg2+theme(legend.position="bottom")
+gg2<-gg2+xlab("Current Ratio")+ylab("Stock Closing Price")
+gg2<-gg2+ggtitle("Closing Price by Current Ratio") + theme(plot.title = element_text(hjust = 0.5))
+gg2
+
+#See the rmse
+rmse1<-ModelMetrics::rmse(data1$close,data1$pred_close)
+rmse1
+```
+
+Each flat red line represents the average stock prices predicted at a level of current ratio. Each line moving up from left to right is an indicator of how well current ratio predicts actual stock price, but it is easier to understand if we have a number that can be used as an indicator for how well it predicts.
+
+The root-mean-square error (RMSE) is a frequently used measure of the differences between values predicted by a model or an estimator and the values actually observed. In this case, the RMSE is `r round(rmse1, digits = 2)`, meaning there was on average a difference of `r round(rmse1, digits = 2)` between the predicted price and actual price, in dollars. The lower the RMSE, the closer the variable is to predicting the actual prices. We can continue to analyze other variables independently to see how low their RMSEs are.
+
+This is a graph showing average prices at levels of the gross margin:
+
+```{r}
+##----------------------------------------------
+##-------COND MEAN USING GROSS MARGIN---------
+
+
+##Condtional Average across a single variable
+data1<-overall
+## Create a variable for quartiles of college education
+data1<-data1%>%mutate(predictor_level=ntile(gross_margin,4))
+
+## ^ this splits countries into quartiles based on variables, it assigns counties to a number 1-4
+table(data1$predictor_level)
+
+data1<-data1%>%group_by(predictor_level)%>% ## Group by predictor
+  ##Calculate mean at each level of predictor
+  mutate(pred_close=mean(close))%>% 
+  ## Ungroup
+  ungroup()%>% 
+  #Rank by prediction, with ties sorted randomly
+  mutate(pred_close_rank=rank(pred_close,ties.method="random"))
+
+gg2<-ggplot(data=data1,aes(x=pred_close_rank,y=close,color="Actual"))
+gg2<-gg2+geom_point(alpha=.5,size=.5)
+gg2<-gg2+geom_point(aes(x=pred_close_rank,y=pred_close,color="Predicted:Conditional Mean, 1 var"))
+gg2<-gg2+ scale_color_manual("Type",values=c("Predicted:Conditional Mean, 1 var"="red","Actual"="black"))
+gg2<-gg2+theme(legend.position="bottom")
+gg2<-gg2+xlab("Gross Margin")+ylab("Stock Closing Price")
+gg2<-gg2+ggtitle("Closing Price by Gross Margin") + theme(plot.title = element_text(hjust = 0.5))
+gg2
+
+rmse2<-ModelMetrics::rmse(data1$close,data1$pred_close)
+rmse2
+```
+
+Our RMSE for this comparison is `r round(rmse2, digits = 2)`, meaning that gross margin is not as good at predicting actual prices as the current ratio is.
+
+This is a graph showing average prices at levels of the operating profit margin:
+
+```{r}
+##----------------------------------------------
+##-------COND MEAN USING OPERATING PROFIT MARGIN---------
+
+
+##Condtional Average across a single variable
+data1<-overall
+## Create a variable for quartiles of college education
+data1<-data1%>%mutate(predictor_level=ntile(oper_profit_margin,4))
+
+## ^ this splits countries into quartiles based on variables, it assigns counties to a number 1-4
+table(data1$predictor_level)
+
+data1<-data1%>%group_by(predictor_level)%>% ## Group by predictor
+  ##Calculate mean at each level of predictor
+  mutate(pred_close=mean(close))%>% 
+  ## Ungroup
+  ungroup()%>% 
+  #Rank by prediction, with ties sorted randomly
+  mutate(pred_close_rank=rank(pred_close,ties.method="random"))
+
+gg2<-ggplot(data=data1,aes(x=pred_close_rank,y=close,color="Actual"))
+gg2<-gg2+geom_point(alpha=.5,size=.5)
+gg2<-gg2+geom_point(aes(x=pred_close_rank,y=pred_close,color="Predicted:Conditional Mean, 1 var"))
+gg2<-gg2+ scale_color_manual("Type",values=c("Predicted:Conditional Mean, 1 var"="red","Actual"="black"))
+gg2<-gg2+theme(legend.position="bottom")
+gg2<-gg2+xlab("Operating Profit Margin")+ylab("Stock Closing Price")
+gg2<-gg2+ggtitle("Closing Price by Operating Profit Margin") + theme(plot.title = element_text(hjust = 0.5))
+gg2
+
+rmse3<-ModelMetrics::rmse(data1$close,data1$pred_close)
+rmse3
+```
+
+The RMSE is `r round(rmse3, digits = 2)`.
+
+This is a graph showing average prices at levels of the EBIT margin:
+
+```{r}
+##----------------------------------------------
+##-------COND MEAN USING EBIT MARGIN----------
+
+
+##Condtional Average across a single variable
+data1<-overall
+## Create a variable for quartiles of college education
+data1<-data1%>%mutate(predictor_level=ntile(ebit_margin,4))
+
+## ^ this splits countries into quartiles based on variables, it assigns counties to a number 1-4
+table(data1$predictor_level)
+
+data1<-data1%>%group_by(predictor_level)%>% ## Group by predictor
+  ##Calculate mean at each level of predictor
+  mutate(pred_close=mean(close))%>% 
+  ## Ungroup
+  ungroup()%>% 
+  #Rank by prediction, with ties sorted randomly
+  mutate(pred_close_rank=rank(pred_close,ties.method="random"))
+
+gg2<-ggplot(data=data1,aes(x=pred_close_rank,y=close,color="Actual"))
+gg2<-gg2+geom_point(alpha=.5,size=.5)
+gg2<-gg2+geom_point(aes(x=pred_close_rank,y=pred_close,color="Predicted:Conditional Mean, 1 var"))
+gg2<-gg2+ scale_color_manual("Type",values=c("Predicted:Conditional Mean, 1 var"="red","Actual"="black"))
+gg2<-gg2+theme(legend.position="bottom")
+gg2<-gg2+xlab("EBIT Margin")+ylab("Stock Closing Price")
+gg2<-gg2+ggtitle("Closing Price by EBIT Margin") + theme(plot.title = element_text(hjust = 0.5))
+gg2
+
+rmse4<-ModelMetrics::rmse(data1$close,data1$pred_close)
+rmse4
+```
+
+The RMSE is `r round(rmse4, digits = 2)`.
+
+This is a graph showing average prices at levels of the EBITDA Margin:
+
+```{r}
+##----------------------------------------------
+##-------COND MEAN USING EBITDA MARGIN----------
+
+
+##Condtional Average across a single variable
+data1<-overall
+## Create a variable for quartiles of college education
+data1<-data1%>%mutate(predictor_level=ntile(ebitda_margin,4))
+
+## ^ this splits countries into quartiles based on variables, it assigns counties to a number 1-4
+table(data1$predictor_level)
+
+data1<-data1%>%group_by(predictor_level)%>% ## Group by predictor
+  ##Calculate mean at each level of predictor
+  mutate(pred_close=mean(close))%>% 
+  ## Ungroup
+  ungroup()%>% 
+  #Rank by prediction, with ties sorted randomly
+  mutate(pred_close_rank=rank(pred_close,ties.method="random"))
+
+gg2<-ggplot(data=data1,aes(x=pred_close_rank,y=close,color="Actual"))
+gg2<-gg2+geom_point(alpha=.5,size=.5)
+gg2<-gg2+geom_point(aes(x=pred_close_rank,y=pred_close,color="Predicted:Conditional Mean, 1 var"))
+gg2<-gg2+ scale_color_manual("Type",values=c("Predicted:Conditional Mean, 1 var"="red","Actual"="black"))
+gg2<-gg2+theme(legend.position="bottom")
+gg2<-gg2+xlab("EBITDA Margin")+ylab("Stock Closing Price")
+gg2<-gg2+ggtitle("Closing Price by EBITDA Margin") + theme(plot.title = element_text(hjust = 0.5))
+gg2
+
+rmse5<-ModelMetrics::rmse(data1$close,data1$pred_close)
+rmse5
+```
+
+The RMSE is `r round(rmse5, digits = 2)`.
+
+This is a graph showing average prices at levels of the pretax profit margin:
+
+```{r}
+##----------------------------------------------
+##-------COND MEAN USING PRETAX PROFIT MARGIN----------
+
+
+##Condtional Average across a single variable
+data1<-overall
+## Create a variable for quartiles of college education
+data1<-data1%>%mutate(predictor_level=ntile(pretax_profit_margin,4))
+
+## ^ this splits countries into quartiles based on variables, it assigns counties to a number 1-4
+table(data1$predictor_level)
+
+data1<-data1%>%group_by(predictor_level)%>% ## Group by predictor
+  ##Calculate mean at each level of predictor
+  mutate(pred_close=mean(close))%>% 
+  ## Ungroup
+  ungroup()%>% 
+  #Rank by prediction, with ties sorted randomly
+  mutate(pred_close_rank=rank(pred_close,ties.method="random"))
+
+gg2<-ggplot(data=data1,aes(x=pred_close_rank,y=close,color="Actual"))
+gg2<-gg2+geom_point(alpha=.5,size=.5)
+gg2<-gg2+geom_point(aes(x=pred_close_rank,y=pred_close,color="Predicted:Conditional Mean, 1 var"))
+gg2<-gg2+ scale_color_manual("Type",values=c("Predicted:Conditional Mean, 1 var"="red","Actual"="black"))
+gg2<-gg2+theme(legend.position="bottom")
+gg2<-gg2+xlab("Pretax Profit Margin")+ylab("Stock Closing Price")
+gg2<-gg2+ggtitle("Closing Price by Pretax Profit Margin") + theme(plot.title = element_text(hjust = 0.5))
+gg2
+
+rmse6<-ModelMetrics::rmse(data1$close,data1$pred_close)
+rmse6
+```
+
+The RMSE is `r round(rmse6, digits = 2)`.
+
+This is a graph showing average prices at levels of the profit margin:
+
+```{r}
+##----------------------------------------------
+##-------COND MEAN USING PROFIT MARGIN---------
+
+
+##Condtional Average across a single variable
+data1<-overall
+## Create a variable for quartiles of college education
+data1<-data1%>%mutate(predictor_level=ntile(profit_margin,4))
+
+## ^ this splits countries into quartiles based on variables, it assigns counties to a number 1-4
+table(data1$predictor_level)
+
+data1<-data1%>%group_by(predictor_level)%>% ## Group by predictor
+  ##Calculate mean at each level of predictor
+  mutate(pred_close=mean(close))%>% 
+  ## Ungroup
+  ungroup()%>% 
+  #Rank by prediction, with ties sorted randomly
+  mutate(pred_close_rank=rank(pred_close,ties.method="random"))
+
+gg2<-ggplot(data=data1,aes(x=pred_close_rank,y=close,color="Actual"))
+gg2<-gg2+geom_point(alpha=.5,size=.5)
+gg2<-gg2+geom_point(aes(x=pred_close_rank,y=pred_close,color="Predicted:Conditional Mean, 1 var"))
+gg2<-gg2+ scale_color_manual("Type",values=c("Predicted:Conditional Mean, 1 var"="red","Actual"="black"))
+gg2<-gg2+theme(legend.position="bottom")
+gg2<-gg2+xlab("Profit Margin")+ylab("Stock Closing Price")
+gg2<-gg2+ggtitle("Closing Price by Profit Margin") + theme(plot.title = element_text(hjust = 0.5))
+gg2
+
+rmse7<-ModelMetrics::rmse(data1$close,data1$pred_close)
+rmse7
+```
+
+The RMSE is `r round(rmse7, digits = 2)`.
+
+This is a graph showing average prices at levels of the free cash flow per share:
+
+```{r}
+##----------------------------------------------
+##-------COND MEAN USING RETURN ON FREE CASH FLOW PER SHARE---------
+
+
+##Condtional Average across a single variable
+data1<-overall
+## Create a variable for quartiles of college education
+data1<-data1%>%mutate(predictor_level=ntile(free_cash_flow_per_share,4))
+
+## ^ this splits countries into quartiles based on variables, it assigns counties to a number 1-4
+table(data1$predictor_level)
+
+data1<-data1%>%group_by(predictor_level)%>% ## Group by predictor
+  ##Calculate mean at each level of predictor
+  mutate(pred_close=mean(close))%>% 
+  ## Ungroup
+  ungroup()%>% 
+  #Rank by prediction, with ties sorted randomly
+  mutate(pred_close_rank=rank(pred_close,ties.method="random"))
+
+gg2<-ggplot(data=data1,aes(x=pred_close_rank,y=close,color="Actual"))
+gg2<-gg2+geom_point(alpha=.5,size=.5)
+gg2<-gg2+geom_point(aes(x=pred_close_rank,y=pred_close,color="Predicted:Conditional Mean, 1 var"))
+gg2<-gg2+ scale_color_manual("Type",values=c("Predicted:Conditional Mean, 1 var"="red","Actual"="black"))
+gg2<-gg2+theme(legend.position="bottom")
+gg2<-gg2+xlab("Free Cash Flow Per Share")+ylab("Stock Closing Price")
+gg2<-gg2+ggtitle("Closing Price by Free Cash Flow Per Share") + theme(plot.title = element_text(hjust = 0.5))
+gg2
+
+rmse8<-ModelMetrics::rmse(data1$close,data1$pred_close)
+rmse8
+```
+
+The RMSE is `r round(rmse8, digits = 2)`.
+
+Through testing these variables we find that the three margins/ratios with the lowest RMSE are current ratio, pretax profit margin, and free cash flow per share. Predicting prices using all of the variables simultaneously may help bring the RMSE down, indicating a model that better predicts prices.
+
+By doing unconditional mean on the multiple variables, we may find that we can better predict stock price. For example, here is average price predicted at levels of the current ratio, pretax profit margin, and free cash flow per share.
+
+After doing so, this graph charts overall DOW prices over time compared to predicted overall prices:
+
+```{r}
+##Condtional average across multiple variables
+
+## Calculate quartiles, new dataset
+full_df<-overall
+full_df<-full_df%>%mutate(median_curr_profit=ntile(curr_ratio,4),pretax_profit_margin_levels=ntile(pretax_profit_margin,4),free_cash_flow_per_share_levels=ntile(free_cash_flow_per_share,4))
+
+table(full_df$median_curr_profit)
+
+##Make prediction: prices by quartiles
+
+full_df<-full_df%>%group_by(pretax_profit_margin_levels,free_cash_flow_per_share_levels, median_curr_profit)%>% ## Grouping at multiple levels
+  mutate(pred_pretax_flow_profit=mean(close))%>%
+  ungroup()%>%
+  mutate(pred_pretax_flow_profit_rank=rank(pred_pretax_flow_profit,ties.method="random"))
+ 
+## Showing the various levels
+gg2<-ggplot(data=full_df,aes(x=pred_pretax_flow_profit_rank,y=close,color="Actual"))
+gg2<-gg2+geom_line(alpha=.5,size=.5)
+gg2<-gg2+geom_line(aes(x=pred_pretax_flow_profit_rank,
+                      y=pred_pretax_flow_profit,
+                      color="Predicted:Conditional Mean, 2 vars")
+)
+
+gg2<-gg2+scale_color_manual("Type",values=c("Actual"="black",
+                                   "Predicted:Conditional Mean, 2 vars"="orange"
+))
+
+#graph
+gg2<-gg2+theme(legend.position="bottom")
+gg2<-gg2+xlab("Rank")+ylab("Closing Price")
+gg2<-gg2+ggtitle("Closing Price by Multiple Predictors") + theme(plot.title = element_text(hjust = 0.5))
+gg2
+
+
+rmse_cond_mean<-ModelMetrics::rmse(full_df$close,full_df$pred_pretax_flow_profit)
+rmse_cond_mean
+```
+
+The orange lines is the predicted overall average prices by rank, while the gray line is actual overall prices by rank. It appears that this technique produced a prediction that generally follows the trends of the actual prices. Our RMSE was `r round(rmse_cond_mean, digits = 2)`, and it being this low means that this technique better predicts stock prices than the technique of just using single variables on their own. As shown, it is difficult to track outliers changes in price, but the predictors may be able to predict the average trends of the price movements.
+
+..........
+
+Predictive Model
+
+One can also predict prices based on the linear regression model. Regression analysis helps one understand how the typical value of the dependent variable changes when any one of the independent variables is varied, while the other independent variables are held fixed. Since we found that current ratio, pretax profit margin, and free cash flow per share helped predict prices best out of all the margins and ratios we analyzed, we will run a model using these. To increase the accuracy of the model, I will also include EBIT margin and operating profit margin, which are the variables with the 4th and 5th lowest RMSEs, respectively. We can create a model and then a predictor variable for prices based on the model to add to our dataset.
+
+This graph shows predicted prices for the stocks over time. This is in log form, so the scale for the prices no longer is in dollars.
+
+```{r}
+# New dataset
+full_df2<-overall
+
+mod1<-lm(log(close)~
+           curr_ratio+
+           ebit_margin+
+           oper_profit_margin+
+           pretax_profit_margin+
+           free_cash_flow_per_share
+         ,data=full_df2, na.action = "na.exclude")
+
+htmlreg(mod1)
+
+full_df2<-full_df2%>%mutate(pred1=predict(mod1))
+
+ggpred<-ggplot(data=full_df2,aes(y=pred1,x=month,color=symbol))
+ggpred<-ggpred+geom_point(alpha=.5,size=.5)
+ggpred<-ggpred+xlab("Time")+ylab("Predicted Prices")
+ggpred<-ggpred+geom_line()
+ggpred<-ggpred+ggtitle("Regression Model") + theme(plot.title = element_text(hjust = 0.5))
+ggpred
+
+rmse_reg<-modelr::rmse(mod1,full_df2)
+rmse_reg
+
+```
+
+Lines in the graph represents a stock's price movement over time, each individual line representing a different stock, as indicated by its color.
+
+..........
+
+Predictions from this Model
+
+The RMSE is `r round(rmse_reg, digits = 2)`. This is considerably lower than the other RMSEs we acheived because it is based on log form, and does no longer represent amount off in dollars. We can assume that this model is quite good at predicting prices. Here is what the model shows in terms of statistically significant variables. Our measure of the accuracy of the model, r-squared, is about 41%, meaning that our model can predict 41% of the data. Our p-value is less than 0.05, so the relationship between these variables together and closing price is statistically significant.
+
+The main margins and ratios that predict prices of the DOW 30 are:
+
+Current ratio,
+pretax profit margin,
+free cash flow per share.
+
+While not as statistically significant, these variables were also included in the model as they also helped predict prices more closely:
+
+operating profit margin,
+EBIT margin
+
+..........
+
+Accuracy of the Model
+
+Here are rmse's using conditional mean and regression, respectively:
+
+`r  round(rmse_cond_mean, digits = 2)`,
+`r  round(rmse_reg, digits = 2)`
+
+Our regression model, while in log form, predicts prices more accurately than when using multiple variable conditional means. To see how truly accurate our model is, cross validation can be used. This is a technique to evaluate predictive models by partitioning the original sample into a training set to train the model, and a test set to evaluate it.
+
+This represents a cross validation on the model:
+
+```{r}
+#set up cv
+overall_cv<-overall%>%
+  crossv_mc(n=1000,test=.2)
+overall_cv
+
+#training
+mult_model<-overall_cv %>% 
+  mutate(train = map(train, as_tibble)) %>% ## Convert to tibbles
+  mutate(model = map(train, ~ lm(log(close)~
+                                  curr_ratio+
+                                  ebit_margin+
+                                  oper_profit_margin+
+                                  pretax_profit_margin+
+                                  free_cash_flow_per_share,
+                                 data = .)))%>%
+  mutate(rmse = map2_dbl(model, test, rmse)) 
+
+#graph
+gg_cv<-ggplot(mult_model,aes(rmse))
+gg_cv<-gg_cv+geom_histogram(bins=50)
+gg_cv<-gg_cv+ggtitle("Cross Validation") + theme(plot.title = element_text(hjust = 0.5))
+gg_cv
+```
+
+This is a distribution of RMSEs found from running different sections of the dataset 1000 times. This is not a symmetric distribution as it is skewed to the right. This means there were quite a number of predictions that were more off than usual. The median amount of a price prediction is clearly off by about .47 on the log scale, which is close to the RMSE we found in our regression model using the entire dataset.
+
+..........
+
+Stocks with High Price Expectancy
+
+```{r}
+#for my own search
+overall2 <- filter(overall, curr_ratio > 1, ebit_margin > 10, oper_profit_margin > 10, pretax_profit_margin > 10, free_cash_flow_per_share > 7.2)
+```
+
+Using this model, we can predict which stocks may have high prices in the near future. As always, this is based on correlation, not causality. We can look back into the data set and organize based on the variables in our model, order from highest to lowest or lowest to highest. The stocks that appear at the top are stocks that may be of interest. By filtering based on our chosen margins and ratios, the stocks that come out on top are APPL, BA, CAT, IBM, and MMM. To see how these stocks have performed over time, we can do a porfolio analysis. This is what it would look like if a portfolio consisted of only these five stocks since 2001.
+
+```{r}
+# New set of stocks
+symbols2<-c("MMM","AAPL","BA","CAT","IBM")
+
+# Create dataset
+portfolio<-symbols2%>%
+                     tq_get(
+                     get="stock.prices",
+                     from="2001-01-01",
+                     to="2018-01-01"
+                     )
+
+# Organize
+yearly_returns_stocks <- portfolio %>%
+group_by(symbol) %>%
+tq_transmute(adjusted, periodReturn, period = "yearly")
+
+# Get returns
+results<-tq_portfolio(data = yearly_returns_stocks,
+assets_col = symbol,
+returns_col = yearly.returns,
+col_rename = NULL,
+wealth.index = FALSE)
+
+# Graph
+gggg<-yearly_returns_stocks %>%
+    ggplot(aes(x = date, y = yearly.returns, fill = symbol)) +
+    geom_bar(stat = "identity") +
+    geom_hline(yintercept = 0, color = palette_light()[[1]]) +
+    scale_y_continuous(labels = scales::percent) +
+    labs(title = "Annual Returns on Portfolio",
+         y = "Annual Returns", x = "")  + theme(plot.title = element_text(hjust = 0.5))
+
+gggg
+```
+
+This is a visual representation of annual returns on investment each year from 2001 to present. The amounts of space each color takes up in each bar represents how much the corresponding stock contributed to returns. Based on the positive returns most years, it looks like a great investment decision.
+
+..........
+
+Recommendations
+
+Based on this analysis, we have the following findings.
+
+The main variables in this model that predict prices of the DOW 30 are current ratio, pretax profit margin, and free cash flow per share. EBIT margin and operating profit margin are also worth noting as predictors of closing price. In terms of the stocks to pay attention to, our model points to APPL, BA, CAT, IBM, and MMM. This is based on the margins and ratios chosen. These stocks appear to have been a beneficial investment most years since 2001.
+
+My recommendation is to track the following margins and ratios in order to predict prices changes for the DOW 30:
+
+Current ratio, EBIT margin, operating profit margin, pretax profit margin, free cash flow per share.
+
+Additionally, I recommend investing in the following stocks (especially if they experience a price drop, with the expectation that their prices will rise again):
+
+APPL, BA, CAT, IBM, and MMM.
+
+
+
+
+  
