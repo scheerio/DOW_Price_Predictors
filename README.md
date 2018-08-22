@@ -1,1 +1,0 @@
-#DOW_Price_Predictors
